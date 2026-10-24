@@ -17,7 +17,7 @@ ROOT = os.path.dirname(HERE)
 DIFF = os.path.join(HERE, "ai_cleanup.diff")
 OUT = os.path.join(HERE, "demo.gif")
 
-W, H = 960, 400
+W, H = 960, 450
 PAD, LINE = 22, 22
 BG, FG, DIM = (24, 26, 33), (220, 223, 228), (120, 126, 140)
 GREEN, RED, YELLOW, CYAN = (120, 200, 120), (230, 110, 110), (230, 200, 110), (110, 190, 230)
@@ -58,8 +58,10 @@ def report():
     for line in out.splitlines():
         if line.startswith("# "):
             lines.append((line[2:], BOLD, YELLOW))
-        elif line.startswith("## "):
-            lines.append((line[3:], BOLD, CYAN))
+        elif line.startswith("## Worth a look"):
+            lines.append((line[3:], BOLD, DIM))
+        elif line.startswith(("## ", "### ")):
+            lines.append((line.lstrip("# "), BOLD, CYAN))
         elif line.startswith("- [ ] **"):
             head = line[8:].partition("**:")[0]
         elif head and line.startswith("  `"):
