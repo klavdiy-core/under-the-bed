@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import hashlib
 from dataclasses import asdict, dataclass, field
 
 __version__ = "0.1.0"
@@ -443,6 +444,40 @@ def check_duplicates(files, root, threshold=0.9):
     return out
 
 
+# ---------- baseline: findings a person already acknowledged ----------
+
+def _norm_snippet(snippet):
+    return " ".join(snippet.split())
+
+
+def fingerprints(findings):
+    """One sha256 per finding: file + kind + normalized snippet + occurrence index (1-based, in scan order).
+
+    The occurrence index is what keeps two identical copies apart: the second copy gets index 2 and stays visible.
+    """
+    seen, out = {}, []
+    for f in findings:
+        key = (f.file, f.kind, _norm_snippet(f.snippet))
+        seen[key] = seen.get(key, 0) + 1
+        raw = "|".join([f.file, f.kind, key[2], str(seen[key])])
+        out.append(hashlib.sha256(raw.encode("utf-8")).hexdigest())
+    return out
+
+
+def write_baseline(path, findings):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"version": 1, "fingerprints": fingerprints(findings)}, fh, indent=2)
+
+
+def apply_baseline(findings, path):
+    """Drop findings whose fingerprint is in the baseline file. Returns (kept findings, hidden count)."""
+    with open(path, encoding="utf-8") as fh:
+        known = set(json.load(fh)["fingerprints"])
+    prints = fingerprints(findings)
+    kept = [f for f, p in zip(findings, prints) if p not in known]
+    return kept, len(findings) - len(kept)
+
+
 # ---------- driver ----------
 
 def scan(diff_text, root=None, grow_limit=400):
@@ -495,6 +530,8 @@ def main(argv=None):
     ap.add_argument("--no-dupes", action="store_true", help="skip the search for copies of existing functions")
     ap.add_argument("--json", action="store_true", help="JSON instead of a Markdown checklist")
     ap.add_argument("-o", "--output", help="write the report here instead of stdout")
+    ap.add_argument("--baseline", metavar="FILE", help="hide the findings recorded in this baseline file")
+    ap.add_argument("--write-baseline", metavar="FILE", help="record the current findings in FILE and exit 0")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args(argv)
 
@@ -517,6 +554,18 @@ def main(argv=None):
         return 2
 
     findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit)
+    if a.write_baseline:
+        write_baseline(a.write_baseline, findings)
+        print(f"baseline: {len(findings)} finding(s) recorded in {a.write_baseline}", file=sys.stderr)
+        return 0
+    if a.baseline:
+        try:
+            findings, hidden = apply_baseline(findings, a.baseline)
+        except (OSError, ValueError, KeyError) as e:
+            print(f"under-the-bed: baseline unreadable: {e}", file=sys.stderr)
+            return 2
+        if hidden:
+            print(f"baseline: {hidden} acknowledged finding(s) hidden", file=sys.stderr)
     if a.json:
         report = json.dumps({"source": source, "count": len(findings),
                              "findings": [asdict(f) for f in findings]}, indent=2)

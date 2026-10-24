@@ -57,6 +57,24 @@ Exit code: `0` clean, `1` something under the bed, `2` error. So it can sit in a
 
 Brand-new files only show up once they are staged (`git add`), because `git diff HEAD` does not see untracked files.
 
+### Acknowledged findings: `--baseline`
+
+Once you have read a finding and decided it stays, record it so it stops showing up:
+
+```sh
+python under_the_bed.py --range main --write-baseline .under-the-bed-baseline.json   # record what is there now
+python under_the_bed.py --range main --baseline .under-the-bed-baseline.json         # show only what is new
+```
+
+A finding is identified by its file, its kind, its normalized snippet, and its occurrence number in the file. Two
+identical copies of the same snippet are two findings: when only the first is recorded, the second still shows.
+`--baseline` only hides what you recorded. It does not change what is found, and it does not reduce the noise
+of automated reviewers. A missing baseline file is an error (exit `2`), not an empty baseline.
+
+One honest edge: the occurrence number counts copies in scan order. If a new identical copy is added *above* the one
+you acknowledged, the numbers shift and the older copy is the one that shows up. The count of new findings is right;
+the line it points at may be the old one. Rewrite the baseline after you look.
+
 ### Example
 
 [`examples/ai_cleanup.diff`](examples/ai_cleanup.diff) is a "fixed the EU tax bug" change of the kind an assistant writes:
