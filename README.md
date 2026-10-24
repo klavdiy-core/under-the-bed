@@ -49,6 +49,7 @@ It reads the diff and lists every one of those, with a question to paste back to
 | `flag-parameter` | an existing function that grew a boolean or flag-like parameter |
 | `duplicate` | a new function that is ≥ 90% the same as one already in the repo, after renaming its locals |
 | `file-grew` | a file that grew by 400+ lines in one change |
+| `out-of-scope` | with `--task`: a file the task never points at (see below) |
 
 No network, no LLM, standard library only. Python 3.8+. Works on Python, JS/TS, Go, Java/Kotlin, C#, Rust, C/C++, Ruby, PHP, Swift; the duplicate search knows Python and brace languages.
 
@@ -66,6 +67,24 @@ python under_the_bed.py --json -o report.json
 Exit code: `0` clean, `1` something under the bed, `2` error. So it can sit in a pre-commit hook or CI and stop the commit.
 
 Brand-new files only show up once they are staged (`git add`), because `git diff HEAD` does not see untracked files.
+
+### Changes you did not ask for: `--task`
+
+"Oh my bad, I changed it because I thought it would work." Tell under-the-bed what you asked, and every file the task
+never points at becomes a question:
+
+```sh
+python under_the_bed.py --task "Fix the rounding in total(): it should round to cents."
+python under_the_bed.py --task-file TASK.md
+```
+
+![you asked for a rounding fix; the diff also raised a timeout and made CI ignore failing tests](examples/scope.png)
+
+A file is in scope when the task names its path or file name, names its folder, or names an identifier (`total()`,
+`tax_for`, `` `parseDate` ``) that appears in its changed lines or in the function around them. Tests of an in-scope
+file and the helpers next to those tests are in scope too. It is word matching, not understanding: when the task
+names nothing it can find in the diff ("make it faster"), you get one line saying the scope cannot be checked, not a
+list of accusations.
 
 ### Acknowledged findings: `--baseline`
 

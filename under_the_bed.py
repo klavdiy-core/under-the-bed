@@ -17,7 +17,7 @@ import sys
 import hashlib
 from dataclasses import asdict, dataclass, field
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 CODE_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".go",
@@ -53,6 +53,7 @@ class FileDiff:
     new: bool = False
     added: list = field(default_factory=list)    # (new line no, text)
     removed: list = field(default_factory=list)  # (old line no, text)
+    headers: list = field(default_factory=list)  # text after "@@ ... @@": the enclosing function, per hunk
 
     @property
     def ext(self):
@@ -61,7 +62,7 @@ class FileDiff:
 
 # ---------- diff parsing ----------
 
-HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$")
 
 
 def parse_diff(text):
@@ -85,6 +86,8 @@ def parse_diff(text):
         m = HUNK.match(line)
         if m:
             old_no, new_no = int(m.group(1)), int(m.group(2))
+            if cur is not None and m.group(3).strip():
+                cur.headers.append(m.group(3).strip())
             continue
         if cur is None or line.startswith("\\"):
             continue
@@ -480,9 +483,66 @@ def apply_baseline(findings, path):
 
 # ---------- driver ----------
 
-def scan(diff_text, root=None, grow_limit=400):
+# ---------- scope: what was changed that nobody asked for ----------
+
+FILE_MENTION = re.compile(r"[\w./\\-]*\w\.[A-Za-z]\w{0,5}\b")
+CODE_IDENT = re.compile(r"`([^`]+)`|\b([A-Za-z_]\w*_\w*|[a-z]+[A-Z]\w*|[A-Za-z_]\w*(?=\s*\())")
+WORD = re.compile(r"[A-Za-z][\w-]{2,}")
+STOP = {"the", "fix", "fixes", "fixed", "and", "for", "with", "this", "that", "make", "please", "add", "bug",
+        "change", "update", "file", "code", "test", "tests", "into", "from", "when", "should", "not", "but"}
+TEST_STEM = re.compile(r"^(test_|tests?_)|(_test|_spec|\.test|\.spec)$")
+
+
+def _stem(path):
+    return os.path.splitext(os.path.basename(path))[0].lower()
+
+
+def check_scope(files, task):
+    """Files the task text never points at: by path, by file name, or by an identifier in the changed lines."""
+    text = task.replace("\\", "/")
+    mentions = {m.lower().strip("./") for m in FILE_MENTION.findall(text)}
+    idents = {g for m in CODE_IDENT.finditer(text) for g in m.groups() if g}
+    idents = {i.strip().rstrip("()") for i in idents if len(i.strip()) >= 3}
+    words = {w.lower().replace("-", "_") for w in WORD.findall(FILE_MENTION.sub(" ", text))} - STOP
+
+    def named(fd):
+        """'strong' = the task clearly points here; 'weak' = a word matches part of the name (exempt, not proof)."""
+        p = fd.path.lower()
+        stem = _stem(fd.path).replace("-", "_")
+        dirs = {d.replace("-", "_") for d in p.split("/")[:-1]}
+        changed = "\n".join([t for _, t in fd.added + fd.removed] + fd.headers)
+        if (any(p == m or p.endswith("/" + m) or os.path.basename(p) == m for m in mentions)
+                or stem in words or dirs & words
+                or any(re.search(r"(?<!\w)" + re.escape(i) + r"(?!\w)", changed) for i in idents)):
+            return "strong"
+        if {x for x in re.split(r"[._]", stem) if len(x) >= 3} & words:
+            return "weak"
+        return None
+
+    strength = {fd.path: named(fd) for fd in files}
+    inside = {p for p, s in strength.items() if s}
+    # flags only when the task gives a strong anchor; a weak match alone would turn guesses into accusations
+    if not any(s == "strong" for s in strength.values()):
+        return [Finding("scope-unclear", "(task)", 0,
+                        "The task names no file, file name or identifier found in this diff, so its scope "
+                        "cannot be checked. Which files did you mean?")]
+    stems = {_stem(p) for p in inside}
+    # a test of an in-scope file is in scope; so are the helpers next to such a test (fakes, fixtures)
+    inside |= {fd.path for fd in files if TEST_STEM.sub("", _stem(fd.path)) in stems}
+    test_dirs = {os.path.dirname(p) for p in inside if TEST_STEM.search(_stem(p))}
+    out = []
+    for fd in files:
+        if fd.path in inside or os.path.dirname(fd.path) in test_dirs:
+            continue
+        line = (fd.added or fd.removed or [(0, "")])[0][0]
+        out.append(Finding("out-of-scope", fd.path, line,
+                           "You did not ask for this file to change. Why was it changed, and should it be undone?"))
+    return out
+
+
+def scan(diff_text, root=None, grow_limit=400, task=None):
     files = parse_diff(diff_text)
-    found = []
+    found = check_scope(files, task) if task else []
     for fd in files:
         found += check_lines(fd)
         found += check_tests(fd)
@@ -491,7 +551,7 @@ def scan(diff_text, root=None, grow_limit=400):
     if root:
         found += check_duplicates(files, root)
     order = {fd.path: i for i, fd in enumerate(files)}
-    found.sort(key=lambda f: (order.get(f.file, 0), f.line, f.kind))
+    found.sort(key=lambda f: (order.get(f.file, -1), f.line, f.kind))
     return found
 
 
@@ -532,8 +592,18 @@ def main(argv=None):
     ap.add_argument("-o", "--output", help="write the report here instead of stdout")
     ap.add_argument("--baseline", metavar="FILE", help="hide the findings recorded in this baseline file")
     ap.add_argument("--write-baseline", metavar="FILE", help="record the current findings in FILE and exit 0")
+    ap.add_argument("--task", help="what you asked the assistant to do: files it never points at are questioned")
+    ap.add_argument("--task-file", metavar="FILE", help="the same, read from a file (e.g. TASK.md)")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args(argv)
+    task = a.task
+    if a.task_file:
+        try:
+            with open(a.task_file, encoding="utf-8", errors="replace") as f:
+                task = f.read()
+        except OSError as e:
+            print(f"under-the-bed: task file unreadable: {e}", file=sys.stderr)
+            return 2
 
     root = None
     try:
@@ -553,7 +623,7 @@ def main(argv=None):
         print(f"under-the-bed: {e}", file=sys.stderr)
         return 2
 
-    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit)
+    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task)
     if a.write_baseline:
         write_baseline(a.write_baseline, findings)
         print(f"baseline: {len(findings)} finding(s) recorded in {a.write_baseline}", file=sys.stderr)
