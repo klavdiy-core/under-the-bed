@@ -470,7 +470,7 @@ def render_md(findings, source):
         if f.file != cur:
             cur = f.file
             out += ["", f"## {cur}", ""]
-        out.append(f"- [ ] **L{f.line} · {f.kind}** — {f.question}")
+        out.append(f"- [ ] **L{f.line} {f.kind}**: {f.question}")
         if f.snippet:
             out.append(f"  `{f.snippet[:160]}`")
     return "\n".join(out) + "\n"
@@ -526,6 +526,8 @@ def main(argv=None):
         with open(a.output, "w", encoding="utf-8") as f:
             f.write(report)
     else:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")  # a cp1252 console must not crash on a snippet
         sys.stdout.write(report)
     return 1 if findings else 0
 
