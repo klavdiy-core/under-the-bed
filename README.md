@@ -70,16 +70,16 @@ $ python under_the_bed.py --diff examples/ai_cleanup.diff
 
 ## billing/invoice.py
 
-- [ ] **L10 · flag-parameter** — `total` grew a flag `skip_tax`. Which callers pass it, and why is this not two functions, or a fix of the one?
-- [ ] **L14 · swallowed-exception** — Why is this error swallowed? What should happen when it fires, and where will anyone see it?
-- [ ] **L16 · commented-out-code** — Why is dead code kept in a comment? Git remembers it. Can it go?
-- [ ] **L17 · todo** — Who does this TODO, and when? If it is needed, why is it not done in this change?
-- [ ] **L18 · silenced-check** — Which warning does this silence, and why is hiding it better than fixing it?
+- [ ] **L10 flag-parameter**: `total` grew a flag `skip_tax`. Which callers pass it, and why is this not two functions, or a fix of the one?
+- [ ] **L14 swallowed-exception**: Why is this error swallowed? What should happen when it fires, and where will anyone see it?
+- [ ] **L16 commented-out-code**: Why is dead code kept in a comment? Git remembers it. Can it go?
+- [ ] **L17 todo**: Who does this TODO, and when? If it is needed, why is it not done in this change?
+- [ ] **L18 silenced-check**: Which warning does this silence, and why is hiding it better than fixing it?
 
 ## tests/test_invoice.py
 
-- [ ] **L20 · weakened-test** — Why is this test switched off? Is the code it guards broken now?
-- [ ] **L21 · weakened-test** — This change removes 2 assertion(s) and adds 1. What is no longer checked, and why is that safe?
+- [ ] **L20 weakened-test**: Why is this test switched off? Is the code it guards broken now?
+- [ ] **L21 weakened-test**: This change removes 2 assertion(s) and adds 1. What is no longer checked, and why is that safe?
 ```
 
 (full report with snippets: [`examples/ai_cleanup.report.md`](examples/ai_cleanup.report.md))
