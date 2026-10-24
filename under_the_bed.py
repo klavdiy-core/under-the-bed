@@ -17,7 +17,7 @@ import sys
 import hashlib
 from dataclasses import asdict, dataclass, field
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CODE_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".go",
@@ -45,6 +45,7 @@ class Finding:
     line: int
     question: str
     snippet: str = ""
+    level: str = "fail"      # "fail": hides a failure, fails the run; "info": worth a look, does not fail
 
 
 @dataclass
@@ -54,6 +55,7 @@ class FileDiff:
     added: list = field(default_factory=list)    # (new line no, text)
     removed: list = field(default_factory=list)  # (old line no, text)
     headers: list = field(default_factory=list)  # text after "@@ ... @@": the enclosing function, per hunk
+    context: list = field(default_factory=list)  # unchanged lines shown in the diff
 
     @property
     def ext(self):
@@ -98,6 +100,7 @@ def parse_diff(text):
             cur.removed.append((old_no, line[1:]))
             old_no += 1
         else:
+            cur.context.append(line[1:])
             old_no += 1
             new_no += 1
     return files
@@ -161,6 +164,26 @@ INLINE_CATCH = re.compile(r"\bcatch\s*(\([^)]*\))?\s*\{\s*\}")
 PROMISE_CATCH = re.compile(
     r"\.catch\(\s*(?:\(\s*\w*\s*\)|\w+|function\s*\(\s*\w*\s*\))\s*(?:=>)?\s*(?:\{\s*\}|null|undefined|void 0)\s*\)")
 OPEN_CATCH = re.compile(r"\bcatch\s*(\([^)]*\))?\s*\{\s*$")
+# a swallow followed at once by a fallback is a choice, not a hidden failure (try-each-font loops)
+# a plain `return x` is NOT a fallback (the README example returns with `tax` maybe unset): only a call that names one
+FALLBACK = re.compile(r"\b\w*(default|fallback)\w*\s*\(", re.I)
+
+
+def _in_string(text, pos):
+    """True when position pos sits inside a '...' or "..." literal on this line (crude, single line)."""
+    quote = None
+    i = 0
+    while i < pos:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if quote is None and c in "'\"":
+            quote = c
+        elif c == quote:
+            quote = None
+        i += 1
+    return quote is not None
 
 
 def check_lines(fd):
@@ -177,7 +200,8 @@ def check_lines(fd):
                 bare = m.group(1).strip() == ""
                 inline = m.group(2).strip()
                 body = inline if inline and not inline.startswith("#") else (_next_added(add, i) or "")
-                if bare or PY_NOOP.match(body):
+                after = " ".join(t for _, t in add[i + 2:i + 5])
+                if (bare or PY_NOOP.match(body)) and not (not bare and FALLBACK.search(after)):
                     out.append(Finding("swallowed-exception", fd.path, no, QUESTIONS["swallowed-exception"]
                                        + (" A bare `except:` also catches Ctrl+C and typos." if bare else ""), s))
                     continue
@@ -190,6 +214,8 @@ def check_lines(fd):
         # silenced checks
         if "@ts-expect-error" in text and TEST_PATH.search(fd.path):
             pass  # a type test: the error IS the assertion
+        elif re.search(r"noqa:?\s*E402", text) and any("sys.path" in t for t in fd.context + [t for _, t in add[:i]]):
+            pass  # an import after a sys.path edit: the standard test idiom, not a silenced problem
         elif any(p.search(text) for p in SILENCED) or (fd.ext in TS_LIKE and TS_ANY.search(text)):
             out.append(Finding("silenced-check", fd.path, no, QUESTIONS["silenced-check"], s))
             continue
@@ -217,7 +243,8 @@ def check_tests(fd):
     if not TEST_PATH.search(fd.path):
         return out
     for no, text in fd.added:
-        if SKIP.search(text):
+        m = SKIP.search(text)
+        if m and not _in_string(text, m.start()):      # a skip marker inside a string or regex is test data
             out.append(Finding("weakened-test", fd.path, no, QUESTIONS["skip"], text.strip()))
     gone = sum(1 for _, t in fd.removed if ASSERTION.search(t))
     came = sum(1 for _, t in fd.added if ASSERTION.search(t))
@@ -540,7 +567,40 @@ def check_scope(files, task):
     return out
 
 
-def scan(diff_text, root=None, grow_limit=400, task=None):
+# ---------- levels and repo idiom ----------
+
+# only these hide a failure and fail the run; the rest is worth a look but does not (measured on real commits:
+# with every kind failing, 46 of 75 findings on the author's own repos failed the run, 0 of them real defects)
+FAIL_KINDS = {"swallowed-exception", "weakened-test", "out-of-scope"}
+MARKER = re.compile(r"(noqa:?\s*[A-Z]+\d+|type:\s*ignore|@ts-ignore|eslint-disable[\w-]*|pylint:\s*disable|"
+                    r"pyright:\s*ignore|nolint)")
+
+
+def _idiom_uses(repo, marker, exclude, cache):
+    """How many times the marker appears at HEAD in files this diff does NOT touch (so the change never counts
+    itself, whether it is committed in a --range or still uncommitted)."""
+    if marker not in cache:
+        spec = ["--", "."] + [f":(exclude){p}" for p in exclude]
+        r = subprocess.run(["git", "-C", repo, "grep", "-c", "-F", marker, "HEAD", *spec], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        cache[marker] = sum(int(l.rsplit(":", 1)[1]) for l in r.stdout.splitlines() if l.rsplit(":", 1)[-1].isdigit())
+    return cache[marker]
+
+
+def mark_idioms(found, files, repo, threshold=3):
+    """A silencing marker the repo already used >= threshold times elsewhere is its idiom: info + a note."""
+    cache, touched = {}, [fd.path for fd in files]
+    for f in found:
+        m = MARKER.search(f.snippet) if f.kind == "silenced-check" else None
+        if not m:
+            continue
+        before = _idiom_uses(repo, m.group(1), touched, cache)
+        if before >= threshold:
+            f.level = "info"
+            f.question += f" (repo idiom: `{m.group(1)}` is used {before} times in files this change does not touch.)"
+
+
+def scan(diff_text, root=None, grow_limit=400, task=None, repo=None):
     files = parse_diff(diff_text)
     found = check_scope(files, task) if task else []
     for fd in files:
@@ -550,24 +610,35 @@ def scan(diff_text, root=None, grow_limit=400, task=None):
         found += check_growth(fd, grow_limit)
     if root:
         found += check_duplicates(files, root)
+    for f in found:
+        f.level = "fail" if f.kind in FAIL_KINDS else "info"
+    if repo or root:
+        mark_idioms(found, files, repo or root)
     order = {fd.path: i for i, fd in enumerate(files)}
-    found.sort(key=lambda f: (order.get(f.file, -1), f.line, f.kind))
+    found.sort(key=lambda f: (f.level != "fail", order.get(f.file, -1), f.line, f.kind))
     return found
 
 
 def render_md(findings, source):
     if not findings:
         return f"# Under the bed: clean\n\nNothing swept under the bed in {source}.\n"
-    out = [f"# Under the bed: {len(findings)} thing(s) to ask about",
+    fails = [f for f in findings if f.level == "fail"]
+    infos = [f for f in findings if f.level != "fail"]
+    out = [f"# Under the bed: {len(fails)} thing(s) that hide a failure, {len(infos)} worth a look",
            "", f"Source: {source}. Paste these back to the assistant, one by one."]
-    cur = None
-    for f in findings:
-        if f.file != cur:
-            cur = f.file
-            out += ["", f"## {cur}", ""]
-        out.append(f"- [ ] **L{f.line} {f.kind}**: {f.question}")
-        if f.snippet:
-            out.append(f"  `{f.snippet[:160]}`")
+    for title, group in (("", fails), ("Worth a look (does not fail the run)", infos)):
+        if not group:
+            continue
+        if title:
+            out += ["", f"## {title}"]
+        cur = None
+        for f in group:
+            if f.file != cur:
+                cur = f.file
+                out += ["", f"{'###' if title else '##'} {cur}", ""]
+            out.append(f"- [ ] **L{f.line} {f.kind}**: {f.question}")
+            if f.snippet:
+                out.append(f"  `{f.snippet[:160]}`")
     return "\n".join(out) + "\n"
 
 
@@ -592,6 +663,7 @@ def main(argv=None):
     ap.add_argument("-o", "--output", help="write the report here instead of stdout")
     ap.add_argument("--baseline", metavar="FILE", help="hide the findings recorded in this baseline file")
     ap.add_argument("--write-baseline", metavar="FILE", help="record the current findings in FILE and exit 0")
+    ap.add_argument("--strict", action="store_true", help="every finding fails the run (exit 1), not only the ones that hide a failure")
     ap.add_argument("--task", help="what you asked the assistant to do: files it never points at are questioned")
     ap.add_argument("--task-file", metavar="FILE", help="the same, read from a file (e.g. TASK.md)")
     ap.add_argument("--version", action="version", version=__version__)
@@ -623,7 +695,7 @@ def main(argv=None):
         print(f"under-the-bed: {e}", file=sys.stderr)
         return 2
 
-    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task)
+    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task, repo=root)
     if a.write_baseline:
         write_baseline(a.write_baseline, findings)
         print(f"baseline: {len(findings)} finding(s) recorded in {a.write_baseline}", file=sys.stderr)
@@ -648,7 +720,7 @@ def main(argv=None):
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(errors="replace")  # a cp1252 console must not crash on a snippet
         sys.stdout.write(report)
-    return 1 if findings else 0
+    return 1 if (findings if a.strict else [f for f in findings if f.level == "fail"]) else 0
 
 
 if __name__ == "__main__":

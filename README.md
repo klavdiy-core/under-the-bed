@@ -64,7 +64,16 @@ git diff | python under_the_bed.py --diff -
 python under_the_bed.py --json -o report.json
 ```
 
-Exit code: `0` clean, `1` something under the bed, `2` error. So it can sit in a pre-commit hook or CI and stop the commit.
+Exit code: `1` when something **hides a failure** (a swallowed exception, a switched-off or weakened test, a file you
+did not ask to change), `0` otherwise, `2` on error. The rest (`noqa`, `type: ignore`, TODO, commented-out code, flag
+parameters, copies) is listed under "Worth a look" and does not fail the run, so it can sit in a pre-commit hook or CI
+without blocking ordinary commits. `--strict`: every finding fails the run, as in 0.1.
+
+It knows a few idioms: `# noqa: E402` on an import after `sys.path.insert` (the usual test setup), a skip marker
+inside a string or a regex (test data, not a skipped test), `except OSError: pass` right before a named fallback
+(`return load_default()`), and a silencing marker the repo already uses three or more times in files the change does
+not touch (marked "repo idiom"). Measured on the author's own last 14 commits: 75 findings and every one failing the
+run became 45, of which 5 fail the run without `--task`.
 
 Brand-new files only show up once they are staged (`git add`), because `git diff HEAD` does not see untracked files.
 
@@ -113,20 +122,25 @@ $ python under_the_bed.py --diff examples/ai_cleanup.diff
 ```
 
 ```markdown
-# Under the bed: 7 thing(s) to ask about
+# Under the bed: 3 thing(s) that hide a failure, 4 worth a look
 
 ## billing/invoice.py
 
-- [ ] **L10 flag-parameter**: `total` grew a flag `skip_tax`. Which callers pass it, and why is this not two functions, or a fix of the one?
 - [ ] **L14 swallowed-exception**: Why is this error swallowed? What should happen when it fires, and where will anyone see it?
-- [ ] **L16 commented-out-code**: Why is dead code kept in a comment? Git remembers it. Can it go?
-- [ ] **L17 todo**: Who does this TODO, and when? If it is needed, why is it not done in this change?
-- [ ] **L18 silenced-check**: Which warning does this silence, and why is hiding it better than fixing it?
 
 ## tests/test_invoice.py
 
 - [ ] **L20 weakened-test**: Why is this test switched off? Is the code it guards broken now?
 - [ ] **L21 weakened-test**: This change removes 2 assertion(s) and adds 1. What is no longer checked, and why is that safe?
+
+## Worth a look (does not fail the run)
+
+### billing/invoice.py
+
+- [ ] **L10 flag-parameter**: `total` grew a flag `skip_tax`. Which callers pass it, and why is this not two functions, or a fix of the one?
+- [ ] **L16 commented-out-code**: Why is dead code kept in a comment? Git remembers it. Can it go?
+- [ ] **L17 todo**: Who does this TODO, and when? If it is needed, why is it not done in this change?
+- [ ] **L18 silenced-check**: Which warning does this silence, and why is hiding it better than fixing it?
 ```
 
 (full report with snippets: [`examples/ai_cleanup.report.md`](examples/ai_cleanup.report.md))
