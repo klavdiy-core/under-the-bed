@@ -1,8 +1,26 @@
 # under-the-bed
 
-Find what the AI swept under the bed in your diff.
+**The AI said "Done!". This shows what it hid in the diff.**
 
-> RU: попросили ИИ убрать комнату — он запихал мусор под кровать. Этот инструмент заглядывает под кровать в твоём `git diff` и выдаёт список вопросов, которые надо задать ИИ.
+![before: the assistant says it is done; after: seven hidden things in the same diff](examples/demo.gif)
+
+> RU: ИИ сказал «готово» — инструмент показывает, что он спрятал в диффе: проглоченные ошибки, выключенные тесты, заглушенные предупреждения.
+
+## Try it in one minute
+
+Python 3.8+, nothing to install. Inside any git repo with uncommitted changes:
+
+```sh
+curl -O https://raw.githubusercontent.com/klavdiy-core/under-the-bed/main/under_the_bed.py
+python under_the_bed.py
+```
+
+No changes at hand? Run it on the example from the picture:
+
+```sh
+curl -O https://raw.githubusercontent.com/klavdiy-core/under-the-bed/main/examples/ai_cleanup.diff
+python under_the_bed.py --diff ai_cleanup.diff
+```
 
 ## What hurts
 
@@ -33,14 +51,6 @@ It reads the diff and lists every one of those, with a question to paste back to
 | `file-grew` | a file that grew by 400+ lines in one change |
 
 No network, no LLM, standard library only. Python 3.8+. Works on Python, JS/TS, Go, Java/Kotlin, C#, Rust, C/C++, Ruby, PHP, Swift; the duplicate search knows Python and brace languages.
-
-## Install
-
-One file:
-
-```sh
-curl -O https://raw.githubusercontent.com/klavdiy-core/under-the-bed/main/under_the_bed.py
-```
 
 ## Use
 
