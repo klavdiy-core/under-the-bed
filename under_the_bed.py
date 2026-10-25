@@ -17,7 +17,7 @@ import sys
 import hashlib
 from dataclasses import asdict, dataclass, field
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 CODE_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".go",
@@ -46,6 +46,7 @@ class Finding:
     question: str
     snippet: str = ""
     level: str = "fail"      # "fail": hides a failure, fails the run; "info": worth a look, does not fail
+    idiom: str = ""          # a known harmless shape (listed as info, with why)
 
 
 @dataclass
@@ -143,6 +144,10 @@ def _looks_like_code(body):
     m = CODE_KW.match(body)
     if m:
         kw = m.group(1)
+        if kw in ("import", "from"):
+            # only real import syntax: prose that starts with "from a file; ..." is a comment (found on herald)
+            return bool(re.match(r"^(from\s+[\w.]+\s+import\s+[\w*, ()]+|import\s+[\w.]+(\s+as\s+\w+)?"
+                                 r"(\s*,\s*[\w.]+(\s+as\s+\w+)?)*)\s*;?$", body))
         if kw == "return":
             return bool(re.match(r"^return(\s+[\w.\[\]()\"'+\-*/ ,]+)?;?$", body)) and len(body.split()) <= 4
         if kw in ("else", "try"):
@@ -169,6 +174,24 @@ OPEN_CATCH = re.compile(r"\bcatch\s*(\([^)]*\))?\s*\{\s*$")
 FALLBACK = re.compile(r"\b\w*(default|fallback)\w*\s*\(", re.I)
 
 
+PARSE_ERRORS = re.compile(r"^\s*\(?\s*((json\.)?JSONDecodeError|ValueError|UnicodeDecodeError|KeyError|TypeError|"
+                          r"IndexError|AttributeError)(\s*,\s*((json\.)?JSONDecodeError|ValueError|UnicodeDecodeError|"
+                          r"KeyError|TypeError|IndexError|AttributeError))*\s*\)?\s*(as\s+\w+)?\s*$")
+PARSE_CALL = re.compile(r"\b(json\.loads?|int|float|fromisoformat|strptime|literal_eval|Decimal|UUID)\s*\(|\.decode\(")
+LOG_WRITE = re.compile(r"(log|err)\w*\b.*\b(open|write)|\.write\(|print\(.*stderr", re.I)
+
+
+def _swallow_idiom(caught, body, tried):
+    """Two harmless shapes, seen in three real repos: a damaged record skipped while reading (a parse error, then
+    continue), and a failed write of the error log itself (OSError while writing the log, then pass)."""
+    if PY_NOOP.match(body) and body.strip().startswith("continue") and PARSE_ERRORS.match(caught) \
+            and PARSE_CALL.search(tried):
+        return "a damaged record is skipped while reading"
+    if re.match(r"^\s*\(?\s*(OSError|IOError)\s*\)?\s*$", caught) and LOG_WRITE.search(tried) and "log" in tried.lower():
+        return "writing the error log itself failed"
+    return ""
+
+
 def _in_string(text, pos):
     """True when position pos sits inside a '...' or "..." literal on this line (crude, single line)."""
     quote = None
@@ -184,6 +207,18 @@ def _in_string(text, pos):
             quote = None
         i += 1
     return quote is not None
+
+
+REASON = re.compile(r"(?:noqa:?\s*[A-Z]+\d+(?:,\s*[A-Z]+\d+)*|type:\s*ignore(?:\[[\w-]+\])?|pyright:\s*ignore(?:\[[\w-]+\])?|"
+                    r"pylint:\s*disable=[\w,-]+|eslint-disable[\w-]*(?:\s+[\w/@-]+(?:,\s*[\w/@-]+)*)?|@ts-ignore|"
+                    r"@ts-expect-error)\s*(?:[-—–:]+|because|--)\s*(.+)$")
+
+
+def _reason_written(text):
+    """A silence that says why on the same line ('# noqa: BLE001 — a watcher never takes the turn down') already
+    answers the question; three words or more after a dash or a colon count as a reason."""
+    m = REASON.search(text)
+    return bool(m and len(re.findall(r"[A-Za-zА-Яа-яЁё]{2,}", m.group(1))) >= 3)
 
 
 def check_lines(fd):
@@ -202,8 +237,10 @@ def check_lines(fd):
                 body = inline if inline and not inline.startswith("#") else (_next_added(add, i) or "")
                 after = " ".join(t for _, t in add[i + 2:i + 5])
                 if (bare or PY_NOOP.match(body)) and not (not bare and FALLBACK.search(after)):
+                    tried = " ".join(t for _, t in add[max(0, i - 3):i])
                     out.append(Finding("swallowed-exception", fd.path, no, QUESTIONS["swallowed-exception"]
-                                       + (" A bare `except:` also catches Ctrl+C and typos." if bare else ""), s))
+                                       + (" A bare `except:` also catches Ctrl+C and typos." if bare else ""), s,
+                                       idiom="" if bare else _swallow_idiom(m.group(1), body, tried)))
                     continue
         else:
             nxt = _next_added(add, i)
@@ -217,8 +254,9 @@ def check_lines(fd):
         elif re.search(r"noqa:?\s*E402", text) and any("sys.path" in t for t in fd.context + [t for _, t in add[:i]]):
             pass  # an import after a sys.path edit: the standard test idiom, not a silenced problem
         elif any(p.search(text) for p in SILENCED) or (fd.ext in TS_LIKE and TS_ANY.search(text)):
-            out.append(Finding("silenced-check", fd.path, no, QUESTIONS["silenced-check"], s))
-            continue
+            if not _reason_written(text):
+                out.append(Finding("silenced-check", fd.path, no, QUESTIONS["silenced-check"], s))
+                continue
         body = _comment_body(text, fd.ext)
         if TODO.search(text) and (body is not None or "/*" in text or "#" in text):
             out.append(Finding("todo", fd.path, no, QUESTIONS["todo"], s))
@@ -236,6 +274,10 @@ SKIP = re.compile(
     r"@pytest\.mark\.(skip|xfail)|@unittest\.skip|\bpytest\.skip\(|\b(it|test|describe|context)\.(skip|todo)\(|"
     r"\bx(it|test|describe)\(|@Disabled\b|@Ignore\b|\bt\.Skip(Now|f)?\(|\b(it|test|describe)\.only\(|#\[ignore\]")
 ASSERTION = re.compile(r"\bassert\w*\b|\bexpect\s*\(|\.should\b|\bassert_\w+!|\bt\.(Error|Fatal)f?\(|\bverify\(")
+# a conditional skip on the environment: the test cannot run here, it is not switched off
+ENV_SKIP = re.compile(r"(skipIf|skipUnless|skipif)\s*\(\s*(not\s+)?\(?\s*(sys\.platform|sys\.version_info|os\.name|"
+                      r"platform\.|shutil\.which|importlib|find_spec|os\.environ|os\.getenv|sys\.maxsize|HAS_\w+|"
+                      r"\w+\s+is\s+None)")
 
 
 def check_tests(fd):
@@ -244,6 +286,8 @@ def check_tests(fd):
         return out
     for no, text in fd.added:
         m = SKIP.search(text)
+        if m and ENV_SKIP.search(text):
+            continue                                    # skipped where it cannot run (platform, version, a missing tool)
         if m and not _in_string(text, m.start()):      # a skip marker inside a string or regex is test data
             out.append(Finding("weakened-test", fd.path, no, QUESTIONS["skip"], text.strip()))
     gone = sum(1 for _, t in fd.removed if ASSERTION.search(t))
@@ -320,7 +364,9 @@ def check_flags(fd):
             pn = _param_name(p)
             if pn in old or pn in ("self", "cls"):
                 continue
-            if FLAG_NAME.search(pn) or BOOL_DEFAULT.search(p):
+            # a flag is a boolean: a flag-like name with a non-boolean default (should_abort=None, a callback) is not
+            has_default = "=" in p
+            if BOOL_DEFAULT.search(p) or (FLAG_NAME.search(pn) and not has_default):
                 out.append(Finding(
                     "flag-parameter", fd.path, no,
                     f"`{name}` grew a flag `{pn}`. Which callers pass it, and why is this not two functions, "
@@ -332,6 +378,8 @@ def check_flags(fd):
 
 def check_growth(fd, limit):
     grew = len(fd.added) - len(fd.removed)
+    if TEST_PATH.search(fd.path):
+        return []                                       # tests grow with every fix; that is not code to split out
     if limit and grew >= limit:
         line = fd.added[0][0] if fd.added else 1
         what = "This new file is" if fd.new else "This file grew by"
@@ -611,7 +659,9 @@ def scan(diff_text, root=None, grow_limit=400, task=None, repo=None):
     if root:
         found += check_duplicates(files, root)
     for f in found:
-        f.level = "fail" if f.kind in FAIL_KINDS else "info"
+        f.level = "fail" if f.kind in FAIL_KINDS and not f.idiom else "info"
+        if f.idiom:
+            f.question += f" (Known shape: {f.idiom}; listed, not failed.)"
     if repo or root:
         mark_idioms(found, files, repo or root)
     order = {fd.path: i for i, fd in enumerate(files)}

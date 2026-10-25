@@ -75,6 +75,15 @@ inside a string or a regex (test data, not a skipped test), `except OSError: pas
 not touch (marked "repo idiom"). Measured on the author's own last 14 commits: 75 findings and every one failing the
 run became 45, of which 5 fail the run without `--task`.
 
+0.4.0, measured on 10 real commits of another project (7 findings, 5 of them noise): a skip on the environment
+(`skipUnless(sys.platform == "win32", ...)`, `skipif(sys.version_info < ...)`) is not a weakened test; a silence that
+says why on the same line (`# noqa: BLE001 — a watcher never takes the turn down`) is not asked again; a parameter with
+a flag-like name but a non-boolean default (`should_abort=None`, a callback) is not a flag; prose that starts with
+"from" is not commented-out code, while a real `# import requests` now is; test files growing is not flagged. Two
+common shapes are listed as info instead of failing: a damaged record skipped while reading (`json.loads` / `int()`,
+then `except ValueError: continue`) and a failed write of the error log itself. The same diff now gives 2 findings,
+both worth a look; the example above still gives its 7.
+
 Brand-new files only show up once they are staged (`git add`), because `git diff HEAD` does not see untracked files.
 
 ### Changes you did not ask for: `--task`
