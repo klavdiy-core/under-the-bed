@@ -47,7 +47,7 @@ It reads the diff and lists every one of those, with a question to paste back to
 | `commented-out-code` | new comments that are code, not prose |
 | `weakened-test` | `skip`, `xfail`, `xit`, `.only`, `@Disabled`, `t.Skip` in test files, and test files that lost more assertions than they gained |
 | `flag-parameter` | an existing function that grew a boolean or flag-like parameter |
-| `duplicate` | a new function that is ≥ 90% the same as one already in the repo, after renaming its locals |
+| `duplicate` | a new function that is ≥ 90% the same as one already in the repo after renaming its locals (from 30 tokens), or an exact renamed copy of a short one (`make_slug` = `slugify`) |
 | `file-grew` | a file that grew by 400+ lines in one change |
 | `out-of-scope` | with `--task`: a file the task never points at (see below) |
 
@@ -166,7 +166,7 @@ On ordinary human commits it stays quiet: the last 30 commits of `psf/requests` 
 
 - Heuristics on lines, not a parser. It reads what the diff added, so a swallowed exception split across a context line can slip by.
 - `flag-parameter` needs the old and the new signature in the same diff.
-- The duplicate search reads the working tree (up to 5000 files, 300 KB each), skipping `node_modules`, `venv`, `dist` and dot-folders. `--no-dupes` turns it off.
+- The duplicate search reads the working tree (up to 5000 files, 300 KB each), skipping `node_modules`, `venv`, `dist` and dot-folders; with `--range A..B` it reads the code at `A`, as it was before the change, not today's files. A function under 30 tokens counts only as an exact copy (locals renamed), so short helpers that merely look alike stay quiet; functions under 8 tokens and test cases (`test_*` in test files, which look alike by nature) are not compared. `--no-dupes` turns it off.
 
 ## Test
 

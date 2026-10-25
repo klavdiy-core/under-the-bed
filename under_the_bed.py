@@ -17,7 +17,7 @@ import sys
 import hashlib
 from dataclasses import asdict, dataclass, field
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 CODE_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".go",
@@ -401,7 +401,8 @@ BRACE_DEF = [
 ]
 TOKEN = re.compile(r"[A-Za-z_]\w*|\d+|\S")
 BIND = re.compile(r"\b([A-Za-z_]\w*)\s*(?:=(?!=)|\+=|-=|:=)|\bfor\s*\(?\s*(?:const|let|var)?\s*([A-Za-z_]\w*)|\bas\s+([A-Za-z_]\w*)|\b(?:const|let|var)\s+([A-Za-z_]\w*)")
-MIN_TOKENS = 30
+MIN_TOKENS = 30      # from here a near copy counts (90% the same)
+MIN_SHORT = 8        # shorter functions count only as exact copies (names renamed): `make_slug` = `slugify`
 
 
 def _functions(lines, ext):
@@ -477,33 +478,56 @@ def _walk(root, exts):
                     return
 
 
-def check_duplicates(files, root, threshold=0.9):
+def _sources(root, exts, rev=None):
+    """(relative path, text) of the code to compare against: the working tree, or the tree of commit `rev` (for
+    --range: what existed before the change, not what came later)."""
+    if rev is None:
+        for p in _walk(root, exts):
+            try:
+                with open(p, encoding="utf-8", errors="replace") as f:
+                    yield os.path.relpath(p, root).replace(os.sep, "/"), f.read()
+            except OSError:
+                continue
+        return
+    names = _git(root, "ls-tree", "-r", "--name-only", rev).splitlines()
+    for n, rel in enumerate(r for r in names if os.path.splitext(r)[1].lower() in exts):
+        if n >= 5000:
+            return
+        try:
+            yield rel, _git(root, "show", f"{rev}:{rel}")
+        except (OSError, RuntimeError):
+            continue
+
+
+def check_duplicates(files, root, threshold=0.9, rev=None):
     out = []
     new_funcs = []
     for fd in files:
         if fd.ext in CODE_EXT:
             for name, no, body in _functions(fd.added, fd.ext):
+                if TEST_PATH.search(fd.path) and re.match(r"(?i)^test", name):
+                    continue                           # test cases look alike by nature; copied helpers still count
                 toks = _norm(body)
-                if len(toks) >= MIN_TOKENS:
+                if len(toks) >= MIN_SHORT:
                     new_funcs.append((fd, name, no, toks))
     if not new_funcs:
         return out
     exts = {fd.ext for fd, *_ in new_funcs}
     corpus = []
-    for p in _walk(root, exts):
-        rel = os.path.relpath(p, root).replace(os.sep, "/")
-        try:
-            with open(p, encoding="utf-8", errors="replace") as f:
-                lines = list(enumerate(f.read().splitlines(), 1))
-        except OSError:
-            continue
-        ext = os.path.splitext(p)[1].lower()
+    for rel, text in _sources(root, exts, rev):
+        lines = list(enumerate(text.splitlines(), 1))
+        ext = os.path.splitext(rel)[1].lower()
         for name, no, body in _functions(lines, ext):
             corpus.append((rel, ext, name, no, _norm(body)))
     for fd, name, no, toks in new_funcs:
         best = None
+        short = len(toks) < MIN_TOKENS
         for rel, ext, oname, ono, otoks in corpus:
-            if ext != fd.ext or (rel == fd.path and oname == name) or len(otoks) < MIN_TOKENS:
+            if ext != fd.ext or (rel == fd.path and oname == name) or len(otoks) < MIN_SHORT:
+                continue
+            if short or len(otoks) < MIN_TOKENS:
+                if toks == otoks:                      # a short function counts only as an exact copy
+                    best = (1.0, rel, oname, ono)
                 continue
             if abs(len(otoks) - len(toks)) > 0.3 * max(len(toks), len(otoks)):
                 continue
@@ -648,7 +672,7 @@ def mark_idioms(found, files, repo, threshold=3):
             f.question += f" (repo idiom: `{m.group(1)}` is used {before} times in files this change does not touch.)"
 
 
-def scan(diff_text, root=None, grow_limit=400, task=None, repo=None):
+def scan(diff_text, root=None, grow_limit=400, task=None, repo=None, rev=None):
     files = parse_diff(diff_text)
     found = check_scope(files, task) if task else []
     for fd in files:
@@ -657,7 +681,7 @@ def scan(diff_text, root=None, grow_limit=400, task=None, repo=None):
         found += check_flags(fd)
         found += check_growth(fd, grow_limit)
     if root:
-        found += check_duplicates(files, root)
+        found += check_duplicates(files, root, rev=rev)
     for f in found:
         f.level = "fail" if f.kind in FAIL_KINDS and not f.idiom else "info"
         if f.idiom:
@@ -727,10 +751,14 @@ def main(argv=None):
             print(f"under-the-bed: task file unreadable: {e}", file=sys.stderr)
             return 2
 
-    root = None
+    root, rev = None, None
     try:
         if a.diff:
-            text = sys.stdin.read() if a.diff == "-" else open(a.diff, encoding="utf-8", errors="replace").read()
+            if a.diff == "-":
+                text = sys.stdin.read()
+            else:
+                with open(a.diff, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
             source = "stdin" if a.diff == "-" else a.diff
         else:
             root = _git(a.cwd, "rev-parse", "--show-toplevel").strip()
@@ -739,13 +767,17 @@ def main(argv=None):
             elif a.range:
                 rng = a.range if ".." in a.range else f"{a.range}..HEAD"
                 text, source = _git(root, "diff", "-U3", rng), rng
+                # copies are looked for in the code as it was before the change, not in today's files
+                start = rng.split("..")[0].strip(".") or "HEAD"
+                rev = _git(root, "merge-base", start, rng.split("..")[-1].strip(".") or "HEAD").strip() \
+                    if "..." in rng else start
             else:
                 text, source = _git(root, "diff", "HEAD", "-U3"), "uncommitted changes (git diff HEAD)"
     except (OSError, RuntimeError) as e:
         print(f"under-the-bed: {e}", file=sys.stderr)
         return 2
 
-    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task, repo=root)
+    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task, repo=root, rev=rev)
     if a.write_baseline:
         write_baseline(a.write_baseline, findings)
         print(f"baseline: {len(findings)} finding(s) recorded in {a.write_baseline}", file=sys.stderr)
