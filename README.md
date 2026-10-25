@@ -50,6 +50,7 @@ It reads the diff and lists every one of those, with a question to paste back to
 | `duplicate` | a new function that is ≥ 90% the same as one already in the repo after renaming its locals (from 30 tokens), or an exact renamed copy of a short one (`make_slug` = `slugify`) |
 | `file-grew` | a file that grew by 400+ lines in one change |
 | `out-of-scope` | with `--task`: a file the task never points at (see below) |
+| `other-session`, `subagent-outside-worktree` | with `--session`: a change another session or a stray subagent made (see below) |
 
 No network, no LLM, standard library only. Python 3.8+. Works on Python, JS/TS, Go, Java/Kotlin, C#, Rust, C/C++, Ruby, PHP, Swift; the duplicate search knows Python and brace languages.
 
@@ -103,6 +104,30 @@ A file is in scope when the task names its path or file name, names its folder, 
 file and the helpers next to those tests are in scope too. It is word matching, not understanding: when the task
 names nothing it can find in the diff ("make it faster"), you get one line saying the scope cannot be checked, not a
 list of accusations.
+
+### Edits this session did not make: `--session`
+
+Two Claude Code sessions in one working tree see each other's edits, and a subagent resumed after its worktree was
+cleaned up can write straight into the main project. Name the session whose work you are about to commit, and every
+changed file it did not edit is named with the session or subagent that did:
+
+```sh
+python under_the_bed.py --session latest            # the newest session of this folder
+python under_the_bed.py --session 3f2a9c1e-...       # by id, or a path to its .jsonl transcript
+```
+
+| kind | means | fails the run |
+|---|---|---|
+| `other-session` | another session's transcript edited this file (its id and the time are named) | yes |
+| `subagent-outside-worktree` | a subagent of this session ran in a worktree (or in a folder that is gone) and edited outside it | yes |
+| `not-this-session` | no session transcript edited it: a hand edit, a Bash command, a scheduled job | no |
+
+It reads the transcripts Claude Code keeps under `~/.claude/projects/<folder>/` (or `$CLAUDE_CONFIG_DIR`): only the
+`Write` / `Edit` / `MultiEdit` / `NotebookEdit` calls and their paths, nothing is sent anywhere. Edits made through
+Bash (`sed`, a script) carry no file path there, so they show up as `not-this-session`. A subagent working in a plain
+folder may be told to write outside it, so only a real worktree (`.git` is a file), a `worktrees` path or a vanished
+folder counts: on the author's machine the first version flagged three such told-to writes; this one flags none. A
+project with gigabytes of transcripts takes ~20 s (each transcript is skipped unless it mentions a changed file's name).
 
 ### Acknowledged findings: `--baseline`
 

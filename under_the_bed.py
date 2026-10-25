@@ -17,7 +17,7 @@ import sys
 import hashlib
 from dataclasses import asdict, dataclass, field
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 CODE_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".go",
@@ -639,11 +639,129 @@ def check_scope(files, task):
     return out
 
 
+# ---------- sessions: edits this session did not make ----------
+
+EDIT_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
+
+
+def _key(p):
+    return os.path.normcase(os.path.abspath(p))
+
+
+def _edits(transcript, want=None):
+    """(path key, iso time) for every Write/Edit/MultiEdit/NotebookEdit a Claude Code transcript records, and the
+    cwd it ran in. Bash edits (sed, a script) are not recorded as file paths, so they cannot be attributed.
+    want: file names; a transcript whose text holds none of them is skipped without parsing (a project folder can
+    hold gigabytes of transcripts: 31 s on a real one before this)."""
+    out, cwd = [], None
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return out, cwd
+    if want is not None and not any(w in text for w in want):
+        return out, cwd
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        cwd = cwd or rec.get("cwd")
+        content = (rec.get("message") or {}).get("content")
+        for b in content if isinstance(content, list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in EDIT_TOOLS:
+                p = (b.get("input") or {}).get(EDIT_TOOLS[b["name"]])
+                if isinstance(p, str) and p:
+                    out.append((_key(p), str(rec.get("timestamp", ""))[:16].replace("T", " ")))
+    return out, cwd
+
+
+def _is_worktree(cwd):
+    """A git worktree (.git is a file pointing elsewhere), a path under a 'worktrees' folder, or a folder that is gone
+    - the cleaned-up worktree of the complaint. A plain folder is not: a subagent may be told to write outside it."""
+    if not os.path.isdir(cwd):
+        return True
+    parts = {x.lower() for x in re.split(r"[\\/]", cwd)}
+    return os.path.isfile(os.path.join(cwd, ".git")) or "worktrees" in parts
+
+
+def _under(path_key, dir_path):
+    d = _key(dir_path)
+    return path_key == d or path_key.startswith(d.rstrip("\\/") + os.sep)
+
+
+def find_session(spec, root):
+    """A transcript path as given, or ID / latest under <config>/projects/<the folder name Claude Code makes>."""
+    if spec.endswith(".jsonl") and os.path.isfile(spec):
+        return spec
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    proj = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(root)))
+    if spec == "latest":
+        js = [os.path.join(proj, n) for n in os.listdir(proj) if n.endswith(".jsonl")] if os.path.isdir(proj) else []
+        return max(js, key=os.path.getmtime) if js else None
+    p = os.path.join(proj, spec + ".jsonl")
+    return p if os.path.isfile(p) else None
+
+
+def check_sessions(files, root, transcript):
+    """Files in the diff this session never edited, named with the session that did (from the other transcripts of
+    the same project folder), and edits a subagent of this session made outside its own worktree."""
+    proj = os.path.dirname(os.path.abspath(transcript))
+    sid = os.path.splitext(os.path.basename(transcript))[0]
+    mine = {p for p, _ in _edits(transcript)[0]}
+    out, sub_author = [], {}
+    sub_dir = os.path.join(proj, sid, "subagents")
+    for name in sorted(os.listdir(sub_dir)) if os.path.isdir(sub_dir) else []:
+        if not name.endswith(".jsonl"):
+            continue
+        edits, cwd = _edits(os.path.join(sub_dir, name))
+        for p, ts in edits:
+            mine.add(p)
+            sub_author[p] = name[:-6]
+            if cwd and _key(cwd) != _key(root) and _is_worktree(cwd) and not _under(p, cwd):
+                rel = os.path.relpath(p, _key(root)).replace("\\", "/") if _under(p, root) else p
+                out.append(Finding("subagent-outside-worktree", rel, 0,
+                                   f"Subagent {name[:-6]} ran in its worktree {cwd} but edited this file outside it at "
+                                   f"{ts} (a resumed agent whose worktree was cleaned up writes into the main "
+                                   f"project). Did you mean that change to land here?"))
+    want = {os.path.basename(fd.path) for fd in files if _key(os.path.join(root, fd.path)) not in mine}
+    others = {}
+    if not want:
+        return out
+    for dirpath, _, names in os.walk(proj):
+        for name in names:
+            path = os.path.join(dirpath, name)
+            if not name.endswith(".jsonl") or os.path.abspath(path) == os.path.abspath(transcript) \
+                    or _under(_key(path), sub_dir):
+                continue
+            who = os.path.splitext(name)[0] if dirpath == proj else os.path.relpath(path, proj).replace("\\", "/")
+            for p, ts in _edits(path, want)[0]:
+                if p not in others or ts > others[p][1]:
+                    others[p] = (who, ts)
+    flagged = {f.file for f in out}
+    for fd in files:
+        p = _key(os.path.join(root, fd.path))
+        if p in mine or fd.path in flagged:
+            continue
+        line = (fd.added or fd.removed or [(0, "")])[0][0]
+        if p in others:
+            who, ts = others[p]
+            out.append(Finding("other-session", fd.path, line,
+                               f"This session never edited this file; session {who} did, at {ts}. Two sessions in "
+                               f"one working tree see each other's edits: is this change yours to commit?"))
+        else:
+            out.append(Finding("not-this-session", fd.path, line,
+                               "This session never edited this file with Write or Edit, and no other session of this "
+                               "project did. A hand edit, a Bash command (sed, a script), or a session in another "
+                               "folder?"))
+    return out
+
+
 # ---------- levels and repo idiom ----------
 
 # only these hide a failure and fail the run; the rest is worth a look but does not (measured on real commits:
 # with every kind failing, 46 of 75 findings on the author's own repos failed the run, 0 of them real defects)
-FAIL_KINDS = {"swallowed-exception", "weakened-test", "out-of-scope"}
+FAIL_KINDS = {"swallowed-exception", "weakened-test", "out-of-scope", "other-session", "subagent-outside-worktree"}
 MARKER = re.compile(r"(noqa:?\s*[A-Z]+\d+|type:\s*ignore|@ts-ignore|eslint-disable[\w-]*|pylint:\s*disable|"
                     r"pyright:\s*ignore|nolint)")
 
@@ -672,9 +790,11 @@ def mark_idioms(found, files, repo, threshold=3):
             f.question += f" (repo idiom: `{m.group(1)}` is used {before} times in files this change does not touch.)"
 
 
-def scan(diff_text, root=None, grow_limit=400, task=None, repo=None, rev=None):
+def scan(diff_text, root=None, grow_limit=400, task=None, repo=None, rev=None, session=None, session_root=None):
     files = parse_diff(diff_text)
     found = check_scope(files, task) if task else []
+    if session:
+        found += check_sessions(files, session_root or repo or root or ".", session)
     for fd in files:
         found += check_lines(fd)
         found += check_tests(fd)
@@ -740,6 +860,9 @@ def main(argv=None):
     ap.add_argument("--strict", action="store_true", help="every finding fails the run (exit 1), not only the ones that hide a failure")
     ap.add_argument("--task", help="what you asked the assistant to do: files it never points at are questioned")
     ap.add_argument("--task-file", metavar="FILE", help="the same, read from a file (e.g. TASK.md)")
+    ap.add_argument("--session", metavar="ID|FILE|latest", help="this Claude Code session (id, transcript path, or "
+                    "latest): files it never edited are named with the session or subagent that did")
+    ap.add_argument("--session-root", metavar="DIR", help="the folder the session ran in (default: the repo)")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args(argv)
     task = a.task
@@ -777,7 +900,15 @@ def main(argv=None):
         print(f"under-the-bed: {e}", file=sys.stderr)
         return 2
 
-    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task, repo=root, rev=rev)
+    session = None
+    if a.session:
+        session = find_session(a.session, a.session_root or root or a.cwd)
+        if not session:
+            print(f"under-the-bed: no transcript for session {a.session!r} of {a.session_root or root or a.cwd}",
+                  file=sys.stderr)
+            return 2
+    findings = scan(text, root=None if a.no_dupes else root, grow_limit=a.grow_limit, task=task, repo=root, rev=rev,
+                    session=session, session_root=a.session_root or root)
     if a.write_baseline:
         write_baseline(a.write_baseline, findings)
         print(f"baseline: {len(findings)} finding(s) recorded in {a.write_baseline}", file=sys.stderr)
