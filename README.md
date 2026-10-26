@@ -54,6 +54,30 @@ It reads the diff and lists every one of those, with a question to paste back to
 
 No network, no LLM, standard library only. Python 3.8+. Works on Python, JS/TS, Go, Java/Kotlin, C#, Rust, C/C++, Ruby, PHP, Swift; the duplicate search knows Python and brace languages.
 
+## Next to the alternatives
+
+Others catch the same thing; some go further by running your tests. Each cell is from that project's own README
+(26.10.2026); «not mentioned» means its README does not say, not that it cannot.
+
+| | under-the-bed | [groundtruth](https://github.com/msal2020/groundtruth) | [dunnit](https://github.com/palasht75/dunnit) | [Slopwatch](https://github.com/Aaronontheweb/dotnet-slopwatch) |
+|---|---|---|---|---|
+| for | Python, JS/TS, Go, Java/Kotlin, C#, Rust, C/C++, Ruby, PHP, Swift | npm; runs JS/TS, Python, Go, Swift tests | pip; patterns for Python, JS/TS, Go, Rust, JVM, Ruby, C#, PHP | .NET |
+| **runs your tests to check the claim** | **no** — it reads the diff only | yes | yes, re-runs the proof commands you declare | not mentioned |
+| switched-off / weakened tests | yes | yes | yes | yes |
+| swallowed exceptions | yes | not mentioned | yes, «swallowed errors» | yes, empty catch |
+| silenced warnings / type checks | yes | not mentioned | yes, lint / type / coverage suppression | yes |
+| stubs and TODOs | new TODO/FIXME comments | yes, `throw new Error("TODO")` and the like | yes | not mentioned |
+| changes outside the task | yes, with `--task` | not mentioned | yes, outside the declared `writes` | not mentioned |
+| copies of existing functions, new flag parameters | yes | not mentioned | not mentioned | not mentioned |
+| imported packages that do not exist (npm / PyPI / Go) | no | yes | not mentioned | not mentioned |
+| as a hook | exit code 1 for a pre-commit hook or CI | Claude Code Stop hook (`npx groundtruth init`) | CI workflow; snippets for Claude Code, Cursor, Codex, pre-commit | Claude Code hook, CI |
+| licence | MIT | MIT | MIT | Apache-2.0 |
+
+If you want proof that the tests really pass — or that the packages the assistant imported exist at all — use
+groundtruth or dunnit; groundtruth can even stop Claude Code from ending its turn on a false «done». under-the-bed
+never runs your code. It is for
+the review step: one look at a diff, no setup, and a list of exactly what to ask the assistant about.
+
 ## Use
 
 ```sh
